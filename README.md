@@ -1,110 +1,69 @@
-import org.apache.poi.ss.usermodel.*;
-import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+private static void extractEventId(File file, Environment environment) {
+    try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+        String line;
 
-import java.io.*;
-import java.nio.file.*;
-import java.util.*;
+        while ((line = reader.readLine()) != null) {
+            if (line.toLowerCase().contains("event_id")) {
+                Matcher matcher = Pattern.compile(":=\\s*\"([^\"]+)\"").matcher(line);
+                if (matcher.find()) {
+                    String eventId = matcher.group(1);
+                    System.out.println("🔍 Extracted eventId: " + eventId);
 
-public class EventFileOrganizer {
+                    InputStream is = null;
+                    try {
+                        IHttpInterface sender = HttpFactory.createInstance(
+                            environment,
+                            IRegulatoryConstants.REPORTING_SERVICE_EVENT_HIERARCHY_API,
+                            HttpInterfaceType.GET_INTERFACE
+                        );
 
-    public static void main(String[] args) {
-        File excelFile = new File("Event_data.xlsx");
-        File workingDir = excelFile.getParentFile();
-        File eqOtcFolder = new File(workingDir, "EQ_OTC");
+                        is = sender.execute(eventId);
 
-        if (!eqOtcFolder.exists()) {
-            eqOtcFolder.mkdir();
-        }
+                        if (is == null) {
+                            System.out.println("❌ No response from RS server for eventId: " + eventId);
+                            continue; // Skip to next line
+                        }
 
-        try (FileInputStream fis = new FileInputStream(excelFile);
-             Workbook workbook = new XSSFWorkbook(fis)) {
+                        ZipScenarioFile zipScenarioActual = new ZipScenarioFile();
+                        try {
+                            zipScenarioActual.setZipBytes(ProcessXMLFile.processingZip(IOUtils.toByteArray(is)));
+                        } catch (IOException e) {
+                            System.out.println("❌ Failed to process ZIP for eventId: " + eventId);
+                            e.printStackTrace();
+                            continue;
+                        }
 
-            Sheet sheet = workbook.getSheet("EQ_OTC");
-            if (sheet == null) {
-                System.out.println("Sheet EQ_OTC not found!");
-                return;
-            }
+                        String parentDir = file.getParent();
+                        String originalName = file.getName();
+                        String zipFileName = originalName.replace("_out.pdl", "_out.zip");
 
-            Map<String, List<RowData>> uuidMap = new HashMap<>();
+                        File targetZipFile = new File(parentDir, zipFileName);
+                        try (FileOutputStream fos = new FileOutputStream(targetZipFile)) {
+                            fos.write(zipScenarioActual.getZipBytes());
+                            System.out.println("✅ Saved ZIP file: " + targetZipFile.getAbsolutePath());
+                        } catch (IOException e) {
+                            System.out.println("❌ Failed to write ZIP file for eventId: " + eventId);
+                            e.printStackTrace();
+                        }
 
-            // Assume header is in row 0
-            int uuidCol = getColumnIndex(sheet, "uuid_regu_realtime_traderef.keyword");
-            int eventTypeCol = getColumnIndex(sheet, "event_type_regu_realtime_traderef.keyword");
-            int eventIdCol = getColumnIndex(sheet, "id_regu_realtime_event");
-
-            for (Row row : sheet) {
-                if (row.getRowNum() == 0) continue; // skip header
-
-                String uuid = getCellValue(row.getCell(uuidCol));
-                String eventType = getCellValue(row.getCell(eventTypeCol));
-                String eventId = getCellValue(row.getCell(eventIdCol));
-
-                if (uuid == null || eventType == null || eventId == null) continue;
-
-                uuidMap.computeIfAbsent(uuid, k -> new ArrayList<>())
-                       .add(new RowData(eventType, eventId));
-            }
-
-            for (String uuid : uuidMap.keySet()) {
-                File uuidFolder = new File(eqOtcFolder, uuid);
-                if (!uuidFolder.exists()) uuidFolder.mkdir();
-
-                List<RowData> rows = uuidMap.get(uuid);
-                for (RowData row : rows) {
-                    File eventTypeFolder = new File(uuidFolder, row.eventType);
-                    if (!eventTypeFolder.exists()) eventTypeFolder.mkdir();
-
-                    // Look for files matching eventId
-                    String[] patterns = {
-                        row.eventId + "_out.zip",
-                        row.eventId + "_in.pdl",
-                        row.eventId + "_out.pdl"
-                    };
-
-                    for (String pattern : patterns) {
-                        File sourceFile = new File(workingDir, pattern);
-                        if (sourceFile.exists()) {
-                            File targetFile = new File(eventTypeFolder, sourceFile.getName());
-                            Files.copy(sourceFile.toPath(), targetFile.toPath(),
-                                       StandardCopyOption.REPLACE_EXISTING);
-                            System.out.println("Copied " + sourceFile.getName() + " → " + targetFile.getAbsolutePath());
+                    } catch (Exception e) {
+                        System.out.println("❌ Error calling RS server for eventId: " + eventId);
+                        e.printStackTrace();
+                        continue;
+                    } finally {
+                        if (is != null) {
+                            try {
+                                is.close();
+                            } catch (IOException e) {
+                                System.out.println("⚠️ Failed to close InputStream.");
+                            }
                         }
                     }
                 }
             }
-
-            System.out.println("Finished organizing files!");
-
-        } catch (Exception e) {
-            e.printStackTrace();
         }
-    }
-
-    private static int getColumnIndex(Sheet sheet, String header) {
-        Row headerRow = sheet.getRow(0);
-        for (Cell cell : headerRow) {
-            if (header.equalsIgnoreCase(cell.getStringCellValue())) {
-                return cell.getColumnIndex();
-            }
-        }
-        throw new RuntimeException("Header not found: " + header);
-    }
-
-    private static String getCellValue(Cell cell) {
-        if (cell == null) return null;
-        switch (cell.getCellType()) {
-            case STRING: return cell.getStringCellValue();
-            case NUMERIC: return String.valueOf((long) cell.getNumericCellValue());
-            default: return null;
-        }
-    }
-
-    static class RowData {
-        String eventType;
-        String eventId;
-        RowData(String eventType, String eventId) {
-            this.eventType = eventType;
-            this.eventId = eventId;
-        }
+    } catch (IOException e) {
+        System.out.println("❌ Error reading file: " + file.getAbsolutePath());
+        e.printStackTrace();
     }
 }
